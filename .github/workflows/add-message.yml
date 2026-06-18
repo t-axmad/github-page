@@ -1,0 +1,90 @@
+name: Add Message
+
+on:
+  repository_dispatch:
+    types: [new-message]
+
+jobs:
+  add-message:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq and openssl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+
+      - name: Verify signature and identify sender
+        id: verify
+        run: |
+          # Получаем данные из запроса
+          MESSAGE="${{ github.event.client_payload.message }}"
+          SIGNATURE_B64="${{ github.event.client_payload.signature }}"
+          
+          # Декодируем подпись из Base64
+          echo "$SIGNATURE_B64" | base64 -d > signature.bin
+          
+          # Сохраняем сообщение в файл
+          echo "$MESSAGE" > message.txt
+          
+          # Читаем список разрешённых ключей
+          ALLOWED_KEYS=".keys/allowed_keys.json"
+          
+          # Перебираем все публичные ключи из списка
+          FOUND_NAME=""
+          while IFS= read -r name; do
+            # Получаем публичный ключ для этого имени
+            PUBLIC_KEY=$(jq -r ".\"$name\"" "$ALLOWED_KEYS")
+            
+            # Сохраняем ключ во временный файл
+            echo "$PUBLIC_KEY" > temp_public.pem
+            
+            # Пытаемся проверить подпись этим ключом
+            if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>/dev/null; then
+              FOUND_NAME="$name"
+              echo "✅ Signature verified! Sender: $name"
+              break
+            fi
+          done <<< "$(jq -r 'keys[]' "$ALLOWED_KEYS")"
+          
+          # Если никто не подошёл — ошибка
+          if [ -z "$FOUND_NAME" ]; then
+            echo "❌ No matching public key found. Access denied."
+            exit 1
+          fi
+          
+          # Сохраняем имя отправителя для следующих шагов
+          echo "SENDER_NAME=$FOUND_NAME" >> $GITHUB_ENV
+          echo "MESSAGE_TEXT=$MESSAGE" >> $GITHUB_ENV
+
+      - name: Add message to file
+        run: |
+          SENDER="${{ env.SENDER_NAME }}"
+          MESSAGE="${{ env.MESSAGE_TEXT }}"
+          TIMESTAMP=$(date -Iseconds)
+          
+          if [ ! -f messages.json ]; then
+            echo '[]' > messages.json
+          fi
+          
+          jq --arg s "$SENDER" \
+             --arg m "$MESSAGE" \
+             --arg t "$TIMESTAMP" \
+             '. + [{"username": $s, "message": $m, "timestamp": $t}]' \
+             messages.json > tmp.json
+          
+          mv tmp.json messages.json
+          echo "✅ Message from '$SENDER' added successfully"
+
+      - name: Commit and push
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add messages.json
+          git commit -m "Message from ${{ env.SENDER_NAME }}" || echo "No changes to commit"
+          git push
