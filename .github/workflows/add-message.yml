@@ -1,11 +1,11 @@
-name: Receive Encrypted Message
+name: Add Message
 
 on:
   repository_dispatch:
-    types: [new-encrypted-message]
+    types: [new-message]
 
 jobs:
-  decrypt-and-save:
+  add-message:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -17,48 +17,75 @@ jobs:
       - name: 📦 Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq openssl jq
+          sudo apt-get install -y -qq openssl jq yq
 
-      - name: 🔓 Decrypt message
-        env:
-          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}  # Ваш приватный ключ
+      - name: 📝 Save message and signature
         run: |
-          # Получаем зашифрованное сообщение
-          ENCRYPTED_B64="${{ github.event.client_payload.encrypted }}"
+          echo "${{ github.event.client_payload.message }}" > message.txt
+          echo "${{ github.event.client_payload.signature }}" | base64 -d > signature.bin
+
+      - name: 🔑 Verify signature
+        id: verify
+        run: |
+          echo "🔑 Verifying signature..."
           
-          # Декодируем из Base64
-          echo "$ENCRYPTED_B64" | base64 -d > encrypted.bin
-          
-          # Сохраняем приватный ключ из секрета
-          echo "$PRIVATE_KEY" > private_key.pem
-          
-          # Расшифровываем
-          DECRYPTED=$(openssl pkeyutl -decrypt \
-            -inkey private_key.pem \
-            -in encrypted.bin \
-            -pkeyopt rsa_padding_mode:oaep \
-            -pkeyopt rsa_oaep_md:sha256 2>/dev/null)
-          
-          if [ $? -ne 0 ]; then
-            echo "❌ Decryption failed!"
+          # Читаем YAML и перебираем ключи
+          if [ ! -f ".keys/allowed_keys.yaml" ]; then
+            echo "❌ .keys/allowed_keys.yaml not found!"
             exit 1
           fi
           
-          echo "✅ Decrypted: $DECRYPTED"
-          echo "DECRYPTED_MESSAGE=$DECRYPTED" >> $GITHUB_ENV
+          # Получаем список пользователей из YAML
+          NAMES=$(yq eval -o=json '. | keys' .keys/allowed_keys.yaml | jq -r '.[]')
+          
+          for name in $NAMES; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔑 Trying: $name"
+            
+            # Получаем ключ
+            PUBLIC_KEY=$(yq eval ".\"$name\"" .keys/allowed_keys.yaml)
+            
+            if [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" == "null" ]; then
+              echo "  ⚠️ Empty key, skipping"
+              continue
+            fi
+            
+            echo "$PUBLIC_KEY" > temp_public.pem
+            
+            # Проверяем ключ
+            if ! openssl rsa -pubin -in temp_public.pem -text -noout 2>/dev/null; then
+              echo "  ❌ Invalid key format"
+              continue
+            fi
+            
+            # Проверяем подпись
+            if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>/dev/null; then
+              echo "  ✅✅✅ VERIFIED! Sender: $name"
+              echo "SENDER_NAME=$name" >> $GITHUB_ENV
+              echo "MESSAGE_TEXT=$(cat message.txt)" >> $GITHUB_ENV
+              exit 0
+            else
+              echo "  ❌ Signature mismatch"
+            fi
+          done
+          
+          echo "❌ No matching key found"
+          exit 1
 
       - name: 💾 Save message
         run: |
-          MESSAGE="${{ env.DECRYPTED_MESSAGE }}"
+          SENDER="${{ env.SENDER_NAME }}"
+          MESSAGE="${{ env.MESSAGE_TEXT }}"
           TIMESTAMP=$(date -Iseconds)
           
           if [ ! -f messages.json ]; then
             echo '[]' > messages.json
           fi
           
-          jq --arg m "$MESSAGE" \
+          jq --arg s "$SENDER" \
+             --arg m "$MESSAGE" \
              --arg t "$TIMESTAMP" \
-             '. + [{"message": $m, "timestamp": $t}]' \
+             '. + [{"username": $s, "message": $m, "timestamp": $t}]' \
              messages.json > tmp.json
           
           mv tmp.json messages.json
@@ -68,5 +95,5 @@ jobs:
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git add messages.json
-          git commit -m "New encrypted message" || echo "No changes"
+          git commit -m "Message from ${{ env.SENDER_NAME }}" || echo "No changes"
           git push
