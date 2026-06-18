@@ -17,7 +17,13 @@ jobs:
       - name: 📦 Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq openssl jq yq
+          sudo apt-get install -y -qq openssl jq
+
+      - name: 📥 Install yq
+        run: |
+          # Устанавливаем yq (не из apt, а последнюю версию)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
 
       - name: 📝 Save message and signature
         run: |
@@ -29,20 +35,24 @@ jobs:
         run: |
           echo "🔑 Verifying signature..."
           
-          # Читаем YAML и перебираем ключи
           if [ ! -f ".keys/allowed_keys.yaml" ]; then
             echo "❌ .keys/allowed_keys.yaml not found!"
             exit 1
           fi
           
-          # Получаем список пользователей из YAML
-          NAMES=$(yq eval -o=json '. | keys' .keys/allowed_keys.yaml | jq -r '.[]')
+          # Получаем список пользователей из YAML с помощью yq
+          # yq выводит имена в виде plain text, по одному на строку
+          NAMES=$(yq eval 'keys | .[]' .keys/allowed_keys.yaml)
+          
+          echo "👥 Users in YAML:"
+          echo "$NAMES"
+          echo ""
           
           for name in $NAMES; do
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "🔑 Trying: $name"
             
-            # Получаем ключ
+            # Получаем ключ для пользователя
             PUBLIC_KEY=$(yq eval ".\"$name\"" .keys/allowed_keys.yaml)
             
             if [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" == "null" ]; then
