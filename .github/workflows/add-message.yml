@@ -1,0 +1,100 @@
+name: Add Encrypted Message
+
+on:
+  repository_dispatch:
+    types: [add-message]
+
+jobs:
+  add-message:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install cryptography
+    
+    - name: Process message
+      env:
+        ENCRYPTED_MESSAGE: ${{ github.event.client_payload.encrypted_message }}
+        USERNAME: ${{ github.event.client_payload.username }}
+      run: |
+        python -c "
+        import json
+        import base64
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa, padding
+        from cryptography.hazmat.primitives import hashes
+        import sys
+        
+        # Load public keys
+        try:
+            with open('public-keys.json', 'r') as f:
+                public_keys = json.load(f)
+        except FileNotFoundError:
+            public_keys = {}
+        
+        username = '$USERNAME'
+        encrypted_b64 = '$ENCRYPTED_MESSAGE'
+        
+        # Check if user has public key
+        if username not in public_keys:
+            print(f'User {username} not found')
+            sys.exit(1)
+        
+        # Load public key
+        public_key_pem = public_keys[username].encode()
+        public_key = serialization.load_pem_public_key(public_key_pem)
+        
+        # Decrypt message
+        try:
+            encrypted_data = base64.b64decode(encrypted_b64)
+            decrypted = public_key.decrypt(
+                encrypted_data,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            message = decrypted.decode('utf-8')
+        except Exception as e:
+            print(f'Decryption failed: {e}')
+            sys.exit(1)
+        
+        # Load existing messages
+        try:
+            with open('messages.json', 'r') as f:
+                messages = json.load(f)
+        except FileNotFoundError:
+            messages = []
+        
+        # Add new message
+        messages.append({
+            'username': username,
+            'message': message,
+            'timestamp': '$(date -Iseconds)'
+        })
+        
+        # Save messages
+        with open('messages.json', 'w') as f:
+            json.dump(messages, f, indent=2)
+        "
+    
+    - name: Commit and push
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
+        git add messages.json
+        git diff --staged --quiet || git commit -m "Add message from ${{ github.event.client_payload.username }}"
+        git push
