@@ -1,9 +1,69 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Hello World!</title>
+    <meta charset="UTF-8">
+    <title>Messages</title>
 </head>
 <body>
-Hello World!
+    <h2>Messages</h2>
+    <table border="1" cellpadding="8" cellspacing="0">
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Message</th>
+                <th>Time</th>
+            </tr>
+        </thead>
+        <tbody id="messages">
+            <tr><td colspan="3">Loading...</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        const REPO_OWNER = 'ваш_логин';
+        const REPO_NAME = 'название_репозитория';
+
+        async function loadMessages() {
+            try {
+                const res = await fetch(
+                    `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/messages.json`
+                );
+                
+                if (res.status === 404) {
+                    document.getElementById('messages').innerHTML = 
+                        '<tr><td colspan="3">No messages yet</td></tr>';
+                    return;
+                }
+
+                const data = await res.json();
+                const tbody = document.getElementById('messages');
+                
+                if (!data || data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3">No messages yet</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.reverse().map(msg => `
+                    <tr>
+                        <td><strong>${escape(msg.username)}</strong></td>
+                        <td>${escape(msg.message)}</td>
+                        <td>${msg.timestamp ? msg.timestamp.slice(0,16).replace('T', ' ') : ''}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                document.getElementById('messages').innerHTML = 
+                    '<tr><td colspan="3">Error loading messages</td></tr>';
+            }
+        }
+
+        function escape(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        loadMessages();
+        setInterval(loadMessages, 30000);
+    </script>
 </body>
 </html>
