@@ -1,0 +1,89 @@
+name: Decrypt Message
+
+on:
+  repository_dispatch:
+    types: [new-encrypted-message]
+
+jobs:
+  decrypt-and-save:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📦 Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssl jq
+
+      - name: 🔓 Decrypt and identify sender
+        id: decrypt
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          echo "🔓 Decrypting message..."
+          
+          ENCRYPTED_B64="${{ github.event.client_payload.encrypted }}"
+          SENDER_NAME="${{ github.event.client_payload.sender }}"
+          
+          if [ -z "$ENCRYPTED_B64" ]; then
+            echo "❌ No encrypted message provided"
+            exit 1
+          fi
+          
+          echo "$ENCRYPTED_B64" | base64 -d > encrypted.bin
+          echo "$PRIVATE_KEY" > private_key.pem
+          
+          if ! openssl rsa -in private_key.pem -check -noout 2>/dev/null; then
+            echo "❌ Invalid private key in secrets!"
+            exit 1
+          fi
+          
+          DECRYPTED=$(openssl pkeyutl -decrypt \
+            -inkey private_key.pem \
+            -in encrypted.bin \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 2>/dev/null)
+          
+          if [ $? -ne 0 ] || [ -z "$DECRYPTED" ]; then
+            echo "❌ Decryption failed!"
+            exit 1
+          fi
+          
+          echo "✅ Message decrypted!"
+          echo "DECRYPTED_MESSAGE=$DECRYPTED" >> $GITHUB_ENV
+          
+          if [ -n "$SENDER_NAME" ]; then
+            echo "SENDER_NAME=$SENDER_NAME" >> $GITHUB_ENV
+          else
+            echo "SENDER_NAME=Unknown" >> $GITHUB_ENV
+          fi
+
+      - name: 💾 Save message
+        run: |
+          SENDER="${{ env.SENDER_NAME }}"
+          MESSAGE="${{ env.DECRYPTED_MESSAGE }}"
+          TIMESTAMP=$(date -Iseconds)
+          
+          if [ ! -f messages.json ]; then
+            echo '[]' > messages.json
+          fi
+          
+          jq --arg s "$SENDER" \
+             --arg m "$MESSAGE" \
+             --arg t "$TIMESTAMP" \
+             '. + [{"username": $s, "message": $m, "timestamp": $t}]' \
+             messages.json > tmp.json
+          
+          mv tmp.json messages.json
+
+      - name: 📤 Commit and push
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add messages.json
+          git commit -m "Message from ${{ env.SENDER_NAME }}" || echo "No changes"
+          git push
