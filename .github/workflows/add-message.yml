@@ -11,67 +11,206 @@ jobs:
       contents: write
     
     steps:
-      - name: Checkout
+      # ============================================================
+      # ШАГ 1: Клонируем репозиторий
+      # ============================================================
+      - name: 📥 Step 1 - Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install jq and openssl
+      
+      # ============================================================
+      # ШАГ 2: Устанавливаем утилиты
+      # ============================================================
+      - name: 📦 Step 2 - Install jq and openssl
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq openssl
+          echo "📦 Installing jq and openssl..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq openssl
+          echo "✅ jq version: $(jq --version)"
+          echo "✅ openssl version: $(openssl version)"
 
-      - name: Verify signature and identify sender
-        id: verify
+      # ============================================================
+      # ШАГ 3: Показываем содержимое запроса
+      # ============================================================
+      - name: 📨 Step 3 - Show received payload
         run: |
-          # Получаем данные из запроса
-          MESSAGE="${{ github.event.client_payload.message }}"
-          SIGNATURE_B64="${{ github.event.client_payload.signature }}"
+          echo "📨 Received payload:"
+          echo "  - Message: ${{ github.event.client_payload.message }}"
+          echo "  - Signature (first 50 chars): ${{ github.event.client_payload.signature }}"
+          echo "  - Event type: ${{ github.event.action }}"
+          echo "  - Triggered by: ${{ github.actor }}"
+
+      # ============================================================
+      # ШАГ 4: Проверяем файл allowed_keys.json
+      # ============================================================
+      - name: 📄 Step 4 - Check allowed_keys.json
+        run: |
+          echo "📄 Checking .keys/allowed_keys.json..."
+          echo ""
+          echo "--- FILE CONTENT ---"
+          cat .keys/allowed_keys.json
+          echo ""
+          echo "--- END OF FILE ---"
+          echo ""
           
-          # Декодируем подпись из Base64
-          echo "$SIGNATURE_B64" | base64 -d > signature.bin
+          # Проверяем, существует ли файл
+          if [ ! -f ".keys/allowed_keys.json" ]; then
+            echo "❌ ERROR: File .keys/allowed_keys.json does not exist!"
+            exit 1
+          fi
+          echo "✅ File exists"
           
-          # Сохраняем сообщение в файл
-          echo "$MESSAGE" > message.txt
-          
-          # Читаем список разрешённых ключей
-          ALLOWED_KEYS=".keys/allowed_keys.json"
-          
-          # Перебираем все публичные ключи из списка
-          FOUND_NAME=""
-          while IFS= read -r name; do
-            # Получаем публичный ключ для этого имени
-            PUBLIC_KEY=$(jq -r ".\"$name\"" "$ALLOWED_KEYS")
-            
-            # Сохраняем ключ во временный файл
-            echo "$PUBLIC_KEY" > temp_public.pem
-            
-            # Пытаемся проверить подпись этим ключом
-            if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>/dev/null; then
-              FOUND_NAME="$name"
-              echo "✅ Signature verified! Sender: $name"
-              break
-            fi
-          done <<< "$(jq -r 'keys[]' "$ALLOWED_KEYS")"
-          
-          # Если никто не подошёл — ошибка
-          if [ -z "$FOUND_NAME" ]; then
-            echo "❌ No matching public key found. Access denied."
+          # Проверяем валидность JSON
+          echo ""
+          echo "🔍 Validating JSON..."
+          if jq '.' .keys/allowed_keys.json > /dev/null 2>&1; then
+            echo "✅ JSON is valid"
+          else
+            echo "❌ JSON is invalid!"
+            jq '.' .keys/allowed_keys.json
             exit 1
           fi
           
-          # Сохраняем имя отправителя для следующих шагов
-          echo "SENDER_NAME=$FOUND_NAME" >> $GITHUB_ENV
-          echo "MESSAGE_TEXT=$MESSAGE" >> $GITHUB_ENV
+          # Показываем список пользователей
+          echo ""
+          echo "👥 Allowed users:"
+          jq -r 'keys[]' .keys/allowed_keys.json | while read user; do
+            echo "  - $user"
+          done
+          
+          # Показываем ключи (первые 50 символов)
+          echo ""
+          echo "🔑 Public keys (first 50 chars):"
+          jq -r 'to_entries[] | "  - \(.key): \(.value | .[0:50])..."' .keys/allowed_keys.json
 
-      - name: Add message to file
+      # ============================================================
+      # ШАГ 5: Сохраняем сообщение и подпись в файлы
+      # ============================================================
+      - name: 📝 Step 5 - Save message and signature
         run: |
+          echo "📝 Saving message and signature..."
+          
+          MESSAGE="${{ github.event.client_payload.message }}"
+          SIGNATURE_B64="${{ github.event.client_payload.signature }}"
+          
+          # Сохраняем сообщение
+          echo "$MESSAGE" > message.txt
+          echo "✅ Message saved to message.txt: $MESSAGE"
+          
+          # Декодируем подпись
+          echo "$SIGNATURE_B64" | base64 -d > signature.bin
+          echo "✅ Signature saved to signature.bin"
+          
+          # Показываем размеры
+          echo "📊 Message size: $(wc -c < message.txt) bytes"
+          echo "📊 Signature size: $(wc -c < signature.bin) bytes"
+
+      # ============================================================
+      # ШАГ 6: Проверяем каждый ключ
+      # ============================================================
+      - name: 🔑 Step 6 - Try each public key
+        id: verify
+        run: |
+          echo "🔑 Starting signature verification..."
+          echo ""
+          
+          ALLOWED_KEYS=".keys/allowed_keys.json"
+          FOUND_NAME=""
+          FOUND_KEY=""
+          VERIFY_RESULT=""
+          
+          # Получаем список пользователей
+          USERS=$(jq -r 'keys[]' "$ALLOWED_KEYS")
+          
+          echo "👥 Users to check: $USERS"
+          echo ""
+          
+          for name in $USERS; do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔑 Trying user: $name"
+            
+            # Получаем ключ
+            PUBLIC_KEY=$(jq -r --arg name "$name" '.[$name]' "$ALLOWED_KEYS")
+            
+            # Проверяем, что ключ не пустой
+            if [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" == "null" ]; then
+              echo "  ⚠️ Key is empty or null, skipping..."
+              continue
+            fi
+            
+            # Сохраняем ключ во временный файл
+            echo "$PUBLIC_KEY" > temp_public.pem
+            echo "  ✅ Key saved to temp_public.pem"
+            
+            # Проверяем, что ключ валидный
+            echo "  🔍 Validating public key format..."
+            if openssl rsa -pubin -in temp_public.pem -text -noout 2>&1 | grep -q "unable to load"; then
+              echo "  ❌ Invalid public key format!"
+              echo "  📄 First 100 chars: ${PUBLIC_KEY:0:100}..."
+              continue
+            fi
+            echo "  ✅ Public key is valid"
+            
+            # Показываем информацию о ключе
+            echo "  🔑 Key info:"
+            openssl rsa -pubin -in temp_public.pem -text -noout | head -5 | sed 's/^/    /'
+            
+            # Проверяем подпись
+            echo "  🔐 Verifying signature..."
+            if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>&1; then
+              echo "  ✅✅✅ SIGNATURE VERIFIED! Sender: $name"
+              FOUND_NAME="$name"
+              FOUND_KEY="$PUBLIC_KEY"
+              VERIFY_RESULT="success"
+              break
+            else
+              echo "  ❌ Signature verification failed for $name"
+            fi
+          done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ -z "$FOUND_NAME" ]; then
+            echo "❌❌❌ No matching public key found. Access denied."
+            echo ""
+            echo "📊 Debug info:"
+            echo "  - Users checked: $USERS"
+            echo "  - Message: $(cat message.txt)"
+            echo "  - Signature size: $(wc -c < signature.bin)"
+            exit 1
+          fi
+          
+          echo "✅✅✅ User '$FOUND_NAME' successfully verified!"
+          
+          # Сохраняем для следующих шагов
+          echo "SENDER_NAME=$FOUND_NAME" >> $GITHUB_ENV
+          echo "MESSAGE_TEXT=$(cat message.txt)" >> $GITHUB_ENV
+          
+          # Для отладки сохраняем имя в output
+          echo "sender=$FOUND_NAME" >> $GITHUB_OUTPUT
+
+      # ============================================================
+      # ШАГ 7: Добавляем сообщение в файл
+      # ============================================================
+      - name: 💾 Step 7 - Add message to file
+        run: |
+          echo "💾 Adding message to messages.json..."
+          
           SENDER="${{ env.SENDER_NAME }}"
           MESSAGE="${{ env.MESSAGE_TEXT }}"
           TIMESTAMP=$(date -Iseconds)
           
+          echo "  - Sender: $SENDER"
+          echo "  - Message: $MESSAGE"
+          echo "  - Timestamp: $TIMESTAMP"
+          
+          # Создаём файл если его нет
           if [ ! -f messages.json ]; then
             echo '[]' > messages.json
+            echo "  📄 Created new messages.json"
           fi
           
+          # Добавляем сообщение
           jq --arg s "$SENDER" \
              --arg m "$MESSAGE" \
              --arg t "$TIMESTAMP" \
@@ -79,12 +218,63 @@ jobs:
              messages.json > tmp.json
           
           mv tmp.json messages.json
-          echo "✅ Message from '$SENDER' added successfully"
+          
+          echo "✅ Message added to messages.json"
+          echo ""
+          echo "📄 Current messages count: $(jq '. | length' messages.json)"
 
-      - name: Commit and push
+      # ============================================================
+      # ШАГ 8: Коммитим и пушим
+      # ============================================================
+      - name: 📤 Step 8 - Commit and push
         run: |
+          echo "📤 Committing and pushing changes..."
+          
+          # Настраиваем Git
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
+          
+          # Добавляем файл
           git add messages.json
-          git commit -m "Message from ${{ env.SENDER_NAME }}" || echo "No changes to commit"
+          
+          # Проверяем, есть ли изменения
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+          
+          # Коммитим
+          git commit -m "Message from ${{ env.SENDER_NAME }}"
+          echo "✅ Committed"
+          
+          # Пушим
           git push
+          echo "✅ Pushed"
+          
+          echo "🎉 Done!"
+
+      # ============================================================
+      # ШАГ 9: Показываем результат
+      # ============================================================
+      - name: 📊 Step 9 - Show result
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 RESULT SUMMARY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Status: SUCCESS"
+            echo "👤 Sender: ${{ env.SENDER_NAME }}"
+            echo "💬 Message: ${{ env.MESSAGE_TEXT }}"
+          else
+            echo "❌ Status: FAILED"
+          fi
+          
+          echo ""
+          echo "📄 All messages:"
+          if [ -f messages.json ]; then
+            jq '.' messages.json
+          else
+            echo "  (no messages.json yet)"
+          fi
