@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "username": "user",
+    "message": "hello from user!",
+    "timestamp": "2026-06-18T23:25:55.246800+00:00"
+  }
+]
