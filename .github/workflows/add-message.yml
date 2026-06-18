@@ -17,7 +17,7 @@ jobs:
       - name: 📦 Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq jq openssl yq
+          sudo apt-get install -y -qq jq openssl
 
       - name: 📝 Save message and signature
         run: |
@@ -29,38 +29,48 @@ jobs:
         run: |
           echo "🔑 Verifying signature..."
           
-          # Читаем YAML с помощью yq
-          for name in $(yq eval 'keys | .[]' .keys/allowed_keys.yaml); do
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "🔑 Trying: $name"
+          # Получаем список имён с помощью jq
+          # Сначала читаем весь YAML и преобразуем в JSON
+          if [ -f ".keys/allowed_keys.yaml" ]; then
+            echo "📄 Reading YAML file..."
             
-            # Получаем ключ
-            PUBLIC_KEY=$(yq eval ".\"$name\"" .keys/allowed_keys.yaml)
+            # Получаем список ключей
+            NAMES=$(yq eval -o=json '. | keys' .keys/allowed_keys.yaml | jq -r '.[]')
             
-            if [ -z "$PUBLIC_KEY" ]; then
-              echo "  ⚠️ Empty key, skipping"
-              continue
-            fi
+            echo "👥 Users: $NAMES"
             
-            echo "$PUBLIC_KEY" > temp_public.pem
-            
-            # Проверяем ключ
-            if ! openssl rsa -pubin -in temp_public.pem -text -noout 2>/dev/null; then
-              echo "  ❌ Invalid key"
-              continue
-            fi
-            echo "  ✅ Key is valid"
-            
-            # Проверяем подпись
-            if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>/dev/null; then
-              echo "  ✅✅✅ VERIFIED! Sender: $name"
-              echo "SENDER_NAME=$name" >> $GITHUB_ENV
-              echo "MESSAGE_TEXT=$(cat message.txt)" >> $GITHUB_ENV
-              exit 0
-            else
-              echo "  ❌ Signature mismatch"
-            fi
-          done
+            for name in $NAMES; do
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "🔑 Trying: $name"
+              
+              # Получаем ключ из YAML
+              PUBLIC_KEY=$(yq eval ".\"$name\"" .keys/allowed_keys.yaml)
+              
+              if [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" == "null" ]; then
+                echo "  ⚠️ Empty key, skipping"
+                continue
+              fi
+              
+              echo "$PUBLIC_KEY" > temp_public.pem
+              
+              # Проверяем ключ
+              if ! openssl rsa -pubin -in temp_public.pem -text -noout 2>/dev/null; then
+                echo "  ❌ Invalid key format"
+                continue
+              fi
+              echo "  ✅ Key is valid"
+              
+              # Проверяем подпись
+              if openssl dgst -sha256 -verify temp_public.pem -signature signature.bin message.txt 2>/dev/null; then
+                echo "  ✅✅✅ VERIFIED! Sender: $name"
+                echo "SENDER_NAME=$name" >> $GITHUB_ENV
+                echo "MESSAGE_TEXT=$(cat message.txt)" >> $GITHUB_ENV
+                exit 0
+              else
+                echo "  ❌ Signature mismatch"
+              fi
+            done
+          fi
           
           echo "❌ No matching key found"
           exit 1
@@ -82,6 +92,7 @@ jobs:
              messages.json > tmp.json
           
           mv tmp.json messages.json
+          echo "✅ Message added!"
 
       - name: 📤 Commit and push
         run: |
